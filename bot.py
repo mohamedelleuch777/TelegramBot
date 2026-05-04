@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CLAUDE_BIN         = os.getenv("CLAUDE_BIN", "claude")
 GEMINI_BIN         = os.getenv("GEMINI_BIN", "gemini")
-PROVIDER           = os.getenv("PROVIDER", "claude").lower()   # claude | gemini
+OPENAI_BIN         = os.getenv("OPENAI_BIN", "python openai_cli.py") # Path to our OpenAI CLI script
+PROVIDER           = os.getenv("PROVIDER", "claude").lower()   # claude | gemini | openai
 DB_PATH            = os.getenv("DB_PATH", "history.db")
 HISTORY_WINDOW     = int(os.getenv("HISTORY_WINDOW", "20"))    # messages kept per user
 
@@ -55,7 +56,7 @@ _PREFIX_RE = re.compile(
 _TECHNICAL_TERMS = re.compile(
     r"\b(algorithm|architecture|implement|refactor|debug|optimize|analyse|analyze|"
     r"function|class|database|api|server|deploy|kubernetes|docker|regex|recursion|"
-    r"async|concurrent|performance|security|vulnerability|migration|schema)\b",
+    r"async|concurrent|performance|security|vulnerability|migration|schema|ai|ml|code|programming|system design)\b",
     re.IGNORECASE,
 )
 _DEEP_ANALYSIS = re.compile(
@@ -75,15 +76,16 @@ def classify_prompt(text: str) -> str:
     """Return tier: 'haiku' | 'sonnet' | 'opus'."""
     words = len(text.split())
     score = 0
-    score += min(words // 10, 4)
+    score += min(words // 3, 4)           # Even more weight for word count
     score += min(text.count("?"), 2)
     score += 3 if _CODE_PATTERN.search(text) else 0
     score += 4 if _DEEP_ANALYSIS.search(text) else 0
-    score += min(len(_TECHNICAL_TERMS.findall(text)), 3)
+    score += min(len(_TECHNICAL_TERMS.findall(text)), 7) # Even more weight for technical terms
     score += min(len(_MULTI_STEP.findall(text)), 2)
-    if score <= 3:
+
+    if score <= 5:
         return "haiku"
-    elif score <= 9:
+    elif score <= 14:
         return "sonnet"
     return "opus"
 
@@ -99,10 +101,11 @@ def parse_message(text: str) -> tuple[str, str, str]:
     if m:
         token = m.group(1).lower()
         prompt = text[m.end():]
-        if token in ("claude", "gemini"):
+        if token in ("claude", "gemini", "openai"):
             return token, classify_prompt(prompt), prompt
         else:  # model tier
-            return PROVIDER, token, prompt
+            current_provider = os.getenv("PROVIDER", "claude").lower()
+            return current_provider, token, prompt
     return PROVIDER, classify_prompt(text), text
 
 
@@ -198,9 +201,29 @@ async def run_gemini(prompt: str, tier: str, history: list[dict]) -> str:
     return result.stdout.strip() or result.stderr.strip() or "No response."
 
 
+async def run_openai(prompt: str, tier: str, history: list[dict]) -> str:
+    model = OPENAI_MODELS[tier]
+    full_prompt = _build_transcript(history, prompt)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(
+            OPENAI_BIN.split() + ["--model", model, "--prompt", full_prompt],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        ),
+    )
+    if result.returncode != 0 and result.stderr:
+        logger.error("openai stderr: %s", result.stderr)
+    return result.stdout.strip() or result.stderr.strip() or "No response."
+
+
 async def run_ai(provider: str, tier: str, prompt: str, history: list[dict]) -> str:
     if provider == "gemini":
         return await run_gemini(prompt, tier, history)
+    elif provider == "openai":
+        return await run_openai(prompt, tier, history)
     return await run_claude(prompt, tier, history)
 
 
@@ -239,7 +262,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         f"Hi {user.first_name}! Send me any message and I'll pass it to Claude.\n\n"
-        f"*Provider prefixes:* !claude, !gemini\n"
+        f"*Provider prefixes:* !claude, !gemini, !openai\n"
         f"*Model prefixes:* !haiku, !sonnet, !opus\n"
         f"*Commands:* /clear — reset your conversation history\n\n"
         f"Default provider: `{PROVIDER}`",
@@ -316,4 +339,18 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    pid_file = "/tmp/telegram-bot.pid"
+    try:
+        if os.path.exists(pid_file):
+            old_pid = int(open(pid_file).read().strip())
+            try:
+                os.kill(old_pid, 0)
+                raise SystemExit(f"Bot already running (PID {old_pid}). Stop it first or delete {pid_file}.")
+            except ProcessLookupError:
+                pass  # stale PID file — previous process is gone
+        with open(pid_file, "w") as f:
+            f.write(str(os.getpid()))
+        main()
+    finally:
+        if os.path.exists(pid_file):
+            os.remove(pid_file)
