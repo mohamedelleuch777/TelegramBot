@@ -338,18 +338,36 @@ def main() -> None:
     app.run_polling()
 
 
+def _check_single_instance() -> None:
+    """Kill any other running bot.py processes, then write our PID file."""
+    pid_file = "/tmp/telegram-bot.pid"
+    my_pid = os.getpid()
+
+    # Kill any other python3 bot.py processes (covers instances started without PID file)
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "python.*bot\\.py"],
+            capture_output=True, text=True,
+        )
+        for pid_str in result.stdout.strip().splitlines():
+            pid = int(pid_str)
+            if pid != my_pid:
+                try:
+                    os.kill(pid, 15)  # SIGTERM
+                    logger.info("Terminated stale bot instance (PID %d)", pid)
+                except ProcessLookupError:
+                    pass
+    except FileNotFoundError:
+        pass  # pgrep not available; fall back to PID file only
+
+    with open(pid_file, "w") as f:
+        f.write(str(my_pid))
+
+
 if __name__ == "__main__":
     pid_file = "/tmp/telegram-bot.pid"
+    _check_single_instance()
     try:
-        if os.path.exists(pid_file):
-            old_pid = int(open(pid_file).read().strip())
-            try:
-                os.kill(old_pid, 0)
-                raise SystemExit(f"Bot already running (PID {old_pid}). Stop it first or delete {pid_file}.")
-            except ProcessLookupError:
-                pass  # stale PID file — previous process is gone
-        with open(pid_file, "w") as f:
-            f.write(str(os.getpid()))
         main()
     finally:
         if os.path.exists(pid_file):
