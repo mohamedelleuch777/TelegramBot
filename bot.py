@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CLAUDE_BIN = os.getenv("CLAUDE_BIN", "claude")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 def get_allowed_ids() -> set[int]:
     raw = os.getenv("ALLOWED_USER_IDS", "")
@@ -37,7 +38,7 @@ async def run_claude(prompt: str) -> str:
     result = await loop.run_in_executor(
         None,
         lambda: subprocess.run(
-            [CLAUDE_BIN, "--print", prompt],
+            [CLAUDE_BIN, "--print", "--dangerously-skip-permissions", "--model", CLAUDE_MODEL, prompt],
             capture_output=True,
             text=True,
             timeout=120,
