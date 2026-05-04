@@ -344,6 +344,61 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_allowed(user.id):
+        await update.message.reply_text("You are not authorised to use this bot.")
+        return
+    await update.message.reply_text(
+        "*Commands*\n"
+        "/start — welcome message and current config\n"
+        "/help — show this help\n"
+        "/list — show available providers and models\n"
+        "/clear — reset your conversation history\n\n"
+        "*Persistent config* (use alone, no prompt after)\n"
+        "`#!<provider>` — change provider\n"
+        "`#!<level>` — change model level\n"
+        "`#!<provider>!<level>` — change both\n"
+        "Example: `#!gemini!high`, `#!claude!low`, `#!mid`\n\n"
+        "*Per\\-message overrides* (prepend to your prompt)\n"
+        "`!claude`, `!gemini`, `!openai` — force provider\n"
+        "`!haiku`, `!sonnet`, `!opus` — force model\n"
+        "Example: `!gemini explain async/await`\n\n"
+        "*Levels:* `low` = haiku, `mid` = sonnet, `high` = opus",
+        parse_mode="Markdown",
+    )
+
+
+async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_allowed(user.id):
+        await update.message.reply_text("You are not authorised to use this bot.")
+        return
+    user_provider, user_tier = get_user_config(user.id)
+    tier_label = {None: "auto", "haiku": "low", "sonnet": "mid", "opus": "high"}.get(user_tier, user_tier)
+
+    def mark(provider: str, tier: str) -> str:
+        return " ✓" if provider == user_provider and tier == (user_tier or "auto") else ""
+
+    await update.message.reply_text(
+        "*Available providers and models*\n\n"
+        "*Claude*\n"
+        f"`low  / haiku ` — {CLAUDE_MODELS['haiku']}{mark('claude','haiku')}\n"
+        f"`mid  / sonnet` — {CLAUDE_MODELS['sonnet']}{mark('claude','sonnet')}\n"
+        f"`high / opus  ` — {CLAUDE_MODELS['opus']}{mark('claude','opus')}\n\n"
+        "*Gemini*\n"
+        f"`low  / haiku ` — {GEMINI_MODELS['haiku']}{mark('gemini','haiku')}\n"
+        f"`mid  / sonnet` — {GEMINI_MODELS['sonnet']}{mark('gemini','sonnet')}\n"
+        f"`high / opus  ` — {GEMINI_MODELS['opus']}{mark('gemini','opus')}\n\n"
+        "*OpenAI*\n"
+        f"`low  / haiku ` — {OPENAI_MODELS['haiku']}{mark('openai','haiku')}\n"
+        f"`mid  / sonnet` — {OPENAI_MODELS['sonnet']}{mark('openai','sonnet')}\n"
+        f"`high / opus  ` — {OPENAI_MODELS['opus']}{mark('openai','opus')}\n\n"
+        f"Current config: `{user_provider}` / `{tier_label}`",
+        parse_mode="Markdown",
+    )
+
+
 async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not is_allowed(user.id):
@@ -423,6 +478,8 @@ def main() -> None:
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
