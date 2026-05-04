@@ -172,7 +172,7 @@ async def run_claude(prompt: str, tier: str, history: list[dict]) -> str:
     result = await loop.run_in_executor(
         None,
         lambda: subprocess.run(
-            [CLAUDE_BIN, "--print", "--model", model, full_prompt],
+            [CLAUDE_BIN, "--print", "--permission-mode", "bypassPermissions", "--model", model, full_prompt],
             capture_output=True,
             text=True,
             timeout=120,
