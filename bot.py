@@ -8,7 +8,6 @@ import subprocess
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-
 load_dotenv()
 
 logging.basicConfig(
@@ -43,11 +42,29 @@ OPENAI_MODELS: dict[str, str] = {
     "opus":   "gpt-4o",      # Mapping to a powerful model
 }
 
+VALID_PROVIDERS = {"claude", "gemini", "openai"}
+TIER_ALIASES = {
+    "low":    "haiku",
+    "mid":    "sonnet",
+    "medium": "sonnet",
+    "high":   "opus",
+    # also accept tier names directly
+    "haiku":  "haiku",
+    "sonnet": "sonnet",
+    "opus":   "opus",
+}
+
 # ── Prefix parsing ────────────────────────────────────────────────────────────
 
 # Matches !claude, !gemini, !openai, !haiku, !sonnet, !opus at the start of a message
 _PREFIX_RE = re.compile(
     r"^!(claude|gemini|openai|haiku|sonnet|opus)\s+",
+    re.IGNORECASE,
+)
+
+# Matches config messages: #!gemini!low  #!claude  #!high  #!claude!high etc.
+_CONFIG_RE = re.compile(
+    r"^#(?:!(claude|gemini|openai))?(?:!(low|mid|medium|high|haiku|sonnet|opus))?$",
     re.IGNORECASE,
 )
 
@@ -90,23 +107,34 @@ def classify_prompt(text: str) -> str:
     return "opus"
 
 
-def parse_message(text: str) -> tuple[str, str, str]:
+def parse_config(text: str) -> tuple[str | None, str | None] | None:
+    """If text is a config command (#!provider!tier), return (provider, tier).
+    Either part can be None if omitted. Returns None if not a config command."""
+    m = _CONFIG_RE.match(text.strip())
+    if not m:
+        return None
+    provider = m.group(1).lower() if m.group(1) else None
+    tier_raw = m.group(2).lower() if m.group(2) else None
+    tier = TIER_ALIASES[tier_raw] if tier_raw else None
+    return provider, tier
+
+
+def parse_message(text: str, user_provider: str, user_tier: str | None) -> tuple[str, str, str]:
     """Return (provider, tier, prompt).
 
-    Prefix rules:
-      !claude / !gemini  → force provider, auto-classify tier
-      !haiku/sonnet/opus → force tier, use default provider
+    Per-message prefix rules override user config for that message only.
+    User config (from #! commands) is the persistent default.
     """
     m = _PREFIX_RE.match(text)
     if m:
         token = m.group(1).lower()
         prompt = text[m.end():]
-        if token in ("claude", "gemini", "openai"):
-            return token, classify_prompt(prompt), prompt
-        else:  # model tier
-            current_provider = os.getenv("PROVIDER", "claude").lower()
-            return current_provider, token, prompt
-    return PROVIDER, classify_prompt(text), text
+        if token in VALID_PROVIDERS:
+            return token, user_tier or classify_prompt(prompt), prompt
+        else:  # model tier alias
+            return user_provider, token, prompt
+    tier = user_tier or classify_prompt(text)
+    return user_provider, tier, text
 
 
 # ── SQLite history ────────────────────────────────────────────────────────────
@@ -122,6 +150,46 @@ def init_db() -> None:
             ts      DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS user_config (
+            user_id  INTEGER PRIMARY KEY,
+            provider TEXT,
+            tier     TEXT
+        )
+    """)
+    con.commit()
+    con.close()
+
+
+def get_user_config(user_id: int) -> tuple[str, str | None]:
+    """Return (provider, tier_override). tier_override is None = use auto-classify."""
+    con = sqlite3.connect(DB_PATH)
+    row = con.execute(
+        "SELECT provider, tier FROM user_config WHERE user_id=?", (user_id,)
+    ).fetchone()
+    con.close()
+    if row:
+        return row[0] or PROVIDER, row[1]
+    return PROVIDER, None
+
+
+def set_user_config(user_id: int, provider: str | None, tier: str | None) -> None:
+    con = sqlite3.connect(DB_PATH)
+    existing = con.execute(
+        "SELECT provider, tier FROM user_config WHERE user_id=?", (user_id,)
+    ).fetchone()
+    if existing:
+        new_provider = provider or existing[0]
+        new_tier = tier if tier is not None else existing[1]
+        con.execute(
+            "UPDATE user_config SET provider=?, tier=? WHERE user_id=?",
+            (new_provider, new_tier, user_id),
+        )
+    else:
+        con.execute(
+            "INSERT INTO user_config (user_id, provider, tier) VALUES (?,?,?)",
+            (user_id, provider or PROVIDER, tier),
+        )
     con.commit()
     con.close()
 
@@ -260,12 +328,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(user.id):
         await update.message.reply_text("You are not authorised to use this bot.")
         return
+    user_provider, user_tier = get_user_config(user.id)
+    tier_label = {None: "auto", "haiku": "low", "sonnet": "mid", "opus": "high"}.get(user_tier, user_tier)
     await update.message.reply_text(
-        f"Hi {user.first_name}! Send me any message and I'll pass it to Claude.\n\n"
-        f"*Provider prefixes:* !claude, !gemini, !openai\n"
-        f"*Model prefixes:* !haiku, !sonnet, !opus\n"
-        f"*Commands:* /clear — reset your conversation history\n\n"
-        f"Default provider: `{PROVIDER}`",
+        f"Hi {user.first_name}! Send me any message and I'll pass it to an AI.\n\n"
+        f"*Persistent config* (survives restarts):\n"
+        f"`#!<provider>!<level>` — e.g. `#!gemini!high`, `#!claude!low`, `#!gemini`\n"
+        f"Levels: `low` (fast), `mid` (balanced), `high` (powerful)\n\n"
+        f"*Per-message overrides:*\n"
+        f"Provider: `!claude`, `!gemini`, `!openai`\n"
+        f"Model: `!haiku`, `!sonnet`, `!opus`\n\n"
+        f"*Commands:* /clear — reset conversation history\n\n"
+        f"Current config: `{user_provider}` / `{tier_label}`",
         parse_mode="Markdown",
     )
 
@@ -286,7 +360,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     user_text = update.message.text
-    provider, tier, prompt = parse_message(user_text)
+
+    # Handle # config commands
+    cfg = parse_config(user_text)
+    if cfg is not None:
+        new_provider, new_tier = cfg
+        if new_provider is None and new_tier is None:
+            await update.message.reply_text("Invalid config. Example: `#!gemini!high` or `#!claude!low`", parse_mode="Markdown")
+            return
+        set_user_config(user.id, new_provider, new_tier)
+        current_provider, current_tier = get_user_config(user.id)
+        tier_label = {None: "auto", "haiku": "low", "sonnet": "mid", "opus": "high"}.get(current_tier, current_tier)
+        await update.message.reply_text(
+            f"Config updated.\nProvider: `{current_provider}`\nModel: `{tier_label}`",
+            parse_mode="Markdown",
+        )
+        return
+
+    user_provider, user_tier = get_user_config(user.id)
+    provider, tier, prompt = parse_message(user_text, user_provider, user_tier)
     history = get_history(user.id)
 
     logger.info(
