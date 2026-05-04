@@ -5,8 +5,6 @@ import re
 import sqlite3
 import subprocess
 
-from google import genai
-from google.genai import types as genai_types
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
@@ -23,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CLAUDE_BIN         = os.getenv("CLAUDE_BIN", "claude")
+GEMINI_BIN         = os.getenv("GEMINI_BIN", "gemini")
 PROVIDER           = os.getenv("PROVIDER", "claude").lower()   # claude | gemini
-GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
 DB_PATH            = os.getenv("DB_PATH", "history.db")
 HISTORY_WINDOW     = int(os.getenv("HISTORY_WINDOW", "20"))    # messages kept per user
 
@@ -38,8 +36,6 @@ GEMINI_MODELS: dict[str, str] = {
     "sonnet": "gemini-1.5-pro",
     "opus":   "gemini-2.0-flash-thinking-exp-01-21",
 }
-
-_gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # ── Prefix parsing ────────────────────────────────────────────────────────────
 
@@ -151,7 +147,7 @@ def clear_history(user_id: int) -> None:
 
 # ── Providers ─────────────────────────────────────────────────────────────────
 
-def _build_claude_prompt(history: list[dict], prompt: str) -> str:
+def _build_transcript(history: list[dict], prompt: str) -> str:
     if not history:
         return prompt
     transcript = "\n".join(
@@ -163,7 +159,7 @@ def _build_claude_prompt(history: list[dict], prompt: str) -> str:
 
 async def run_claude(prompt: str, tier: str, history: list[dict]) -> str:
     model = CLAUDE_MODELS[tier]
-    full_prompt = _build_claude_prompt(history, prompt)
+    full_prompt = _build_transcript(history, prompt)
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
         None,
@@ -180,29 +176,21 @@ async def run_claude(prompt: str, tier: str, history: list[dict]) -> str:
 
 
 async def run_gemini(prompt: str, tier: str, history: list[dict]) -> str:
-    if not _gemini_client:
-        return "Gemini provider selected but GEMINI_API_KEY is not set."
-    model_name = GEMINI_MODELS[tier]
-    contents = [
-        genai_types.Content(
-            role="user" if m["role"] == "user" else "model",
-            parts=[genai_types.Part(text=m["content"])],
-        )
-        for m in history
-    ]
-    contents.append(
-        genai_types.Content(role="user", parts=[genai_types.Part(text=prompt)])
-    )
+    model = GEMINI_MODELS[tier]
+    full_prompt = _build_transcript(history, prompt)
     loop = asyncio.get_event_loop()
-
-    def _call():
-        response = _gemini_client.models.generate_content(
-            model=model_name,
-            contents=contents,
-        )
-        return response.text
-
-    return await loop.run_in_executor(None, _call)
+    result = await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(
+            [GEMINI_BIN, "--yolo", "--model", model, "--prompt", full_prompt],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        ),
+    )
+    if result.returncode != 0 and result.stderr:
+        logger.error("gemini stderr: %s", result.stderr)
+    return result.stdout.strip() or result.stderr.strip() or "No response."
 
 
 async def run_ai(provider: str, tier: str, prompt: str, history: list[dict]) -> str:
