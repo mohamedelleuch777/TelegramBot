@@ -62,9 +62,14 @@ _PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Matches config messages: #!gemini!low  #!claude  #!high  #!claude!high etc.
+# Matches config messages: #!gemini!low  #!claude  #!high  #!claude!high  #!help  #!list
 _CONFIG_RE = re.compile(
-    r"^#(?:!(claude|gemini|openai))?(?:!(low|mid|medium|high|haiku|sonnet|opus))?$",
+    r"^#!(help|list|(?:(?:claude|gemini|openai))?(?:!(?:low|mid|medium|high|haiku|sonnet|opus))?)$",
+    re.IGNORECASE,
+)
+_TIER_ONLY_RE = re.compile(r"^(low|mid|medium|high|haiku|sonnet|opus)$", re.IGNORECASE)
+_PROVIDER_TIER_RE = re.compile(
+    r"^(claude|gemini|openai)(?:!(low|mid|medium|high|haiku|sonnet|opus))?$",
     re.IGNORECASE,
 )
 
@@ -107,16 +112,30 @@ def classify_prompt(text: str) -> str:
     return "opus"
 
 
-def parse_config(text: str) -> tuple[str | None, str | None] | None:
-    """If text is a config command (#!provider!tier), return (provider, tier).
-    Either part can be None if omitted. Returns None if not a config command."""
-    m = _CONFIG_RE.match(text.strip())
+def parse_config(text: str) -> tuple[str, str | None, str | None] | None:
+    """Parse a # config command.
+    Returns ('help', None, None), ('list', None, None),
+    ('set', provider_or_None, tier_or_None), or None if not a config command.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("#!"):
+        return None
+    inner = stripped[2:]  # everything after #!
+    if inner.lower() == "help":
+        return ("help", None, None)
+    if inner.lower() == "list":
+        return ("list", None, None)
+    if inner.lower() == "clear":
+        return ("clear", None, None)
+    if _TIER_ONLY_RE.match(inner):
+        return ("set", None, TIER_ALIASES[inner.lower()])
+    m = _PROVIDER_TIER_RE.match(inner)
     if not m:
         return None
-    provider = m.group(1).lower() if m.group(1) else None
+    provider = m.group(1).lower()
     tier_raw = m.group(2).lower() if m.group(2) else None
     tier = TIER_ALIASES[tier_raw] if tier_raw else None
-    return provider, tier
+    return ("set", provider, tier)
 
 
 def parse_message(text: str, user_provider: str, user_tier: str | None) -> tuple[str, str, str]:
@@ -351,10 +370,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "*Commands*\n"
-        "/start — welcome message and current config\n"
-        "/help — show this help\n"
-        "/list — show available providers and models\n"
-        "/clear — reset your conversation history\n\n"
+        "`#!help` — show this help\n"
+        "`#!list` — show available providers and models\n"
+        "`#!clear` — reset your conversation history\n"
+        "/start — welcome message and current config\n\n"
         "*Persistent config* (use alone, no prompt after)\n"
         "`#!<provider>` — change provider\n"
         "`#!<level>` — change model level\n"
@@ -416,20 +435,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     user_text = update.message.text
 
-    # Handle # config commands
+    # Handle #! config commands
     cfg = parse_config(user_text)
     if cfg is not None:
-        new_provider, new_tier = cfg
-        if new_provider is None and new_tier is None:
-            await update.message.reply_text("Invalid config. Example: `#!gemini!high` or `#!claude!low`", parse_mode="Markdown")
-            return
-        set_user_config(user.id, new_provider, new_tier)
-        current_provider, current_tier = get_user_config(user.id)
-        tier_label = {None: "auto", "haiku": "low", "sonnet": "mid", "opus": "high"}.get(current_tier, current_tier)
-        await update.message.reply_text(
-            f"Config updated.\nProvider: `{current_provider}`\nModel: `{tier_label}`",
-            parse_mode="Markdown",
-        )
+        action = cfg[0]
+        if action == "help":
+            await help_cmd(update, context)
+        elif action == "list":
+            await list_cmd(update, context)
+        elif action == "clear":
+            await clear_cmd(update, context)
+        else:  # "set"
+            _, new_provider, new_tier = cfg
+            set_user_config(user.id, new_provider, new_tier)
+            current_provider, current_tier = get_user_config(user.id)
+            tier_label = {None: "auto", "haiku": "low", "sonnet": "mid", "opus": "high"}.get(current_tier, current_tier)
+            await update.message.reply_text(
+                f"Config updated.\nProvider: `{current_provider}`\nModel: `{tier_label}`",
+                parse_mode="Markdown",
+            )
         return
 
     user_provider, user_tier = get_user_config(user.id)
@@ -478,8 +502,6 @@ def main() -> None:
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
