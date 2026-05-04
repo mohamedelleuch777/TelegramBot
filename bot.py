@@ -32,16 +32,21 @@ CLAUDE_MODELS: dict[str, str] = {
     "opus":   "claude-opus-4-7",
 }
 GEMINI_MODELS: dict[str, str] = {
-    "haiku":  "gemini-1.5-flash",
-    "sonnet": "gemini-1.5-pro",
-    "opus":   "gemini-2.0-flash-thinking-exp-01-21",
+    "haiku":  "gemini-2.5-flash-lite",
+    "sonnet": "gemini-2.5-flash",
+    "opus":   "gemini-2.5-pro",
+}
+OPENAI_MODELS: dict[str, str] = {
+    "haiku":  "gpt-3.5-turbo", # Mapping to a faster/cheaper model
+    "sonnet": "gpt-4o",        # Mapping to a balanced model
+    "opus":   "gpt-4o",      # Mapping to a powerful model
 }
 
 # ── Prefix parsing ────────────────────────────────────────────────────────────
 
-# Matches !claude, !gemini, !haiku, !sonnet, !opus at the start of a message
+# Matches !claude, !gemini, !openai, !haiku, !sonnet, !opus at the start of a message
 _PREFIX_RE = re.compile(
-    r"^!(claude|gemini|haiku|sonnet|opus)\s+",
+    r"^!(claude|gemini|openai|haiku|sonnet|opus)\s+",
     re.IGNORECASE,
 )
 
